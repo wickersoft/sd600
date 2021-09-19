@@ -12,9 +12,10 @@ While repairing a number of SD600 flash lamps, I destroyed the MCU of one of the
 * Dimming of incandescent lamp, can be disabled by switch
 * Responds to Test switch and signal on 6.3mm jack
 * Response time to trigger signal ~2µs
+* Optical trigger
 
 **To be added:**
-* Photodiode based trigger
+
 * Lamp-Mode switch
 * Possibly remove dependencies on Arduino core
 
