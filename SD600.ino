@@ -79,6 +79,9 @@ void setup() {
   sei();
 }
 
+
+// We run a simple state machine governing the capacitor bank. A few extra checks are performed
+// frequently, such as bank overvoltage detection.
 void loop() {
   current_volts = analogRead(HV_SENS) >> 1;
   if (current_volts >= EMERGENCY_STOP_VOLTS) {
@@ -87,9 +90,6 @@ void loop() {
 
   current_intens = analogRead(INTENS);
   int target_volts = MIN_VOLTS + (MAX_VOLTS - MIN_VOLTS) * current_intens / 1023L;
-  if (target_volts < MIN_VOLTS) {
-    target_volts = MIN_VOLTS;
-  }
 
   if (state != READY) {
     disarm_flash_int();
@@ -135,7 +135,6 @@ void loop() {
         }
       } else if (millis() >= charge_end) {
         // Took too long to charge --> Bank charging circuit fault
-        CHARGE_OFF;
         //state = FAULT;
       }
       break;
@@ -145,7 +144,10 @@ void loop() {
       FLASH_OFF;
       BEEP_OFF;
       LED_ON;
-      // Maintain voltage or transition if target_volts changes
+
+      // If voltage is significantly higher than selected, eventually dump by flashing.
+      // We wait a few seconds to make sure this is what the user wants, because waste
+      // flash reduces bulb lifetime.
       if (OVERCHARGE_THRESHOLD_EXP(target_volts, current_volts)) {
         if (overcharge_millis == 0) {
           overcharge_millis = millis();
@@ -160,10 +162,16 @@ void loop() {
       } else {
         overcharge_millis = 0;
       }
+
+      // If the user dials up the intensity, we transition back to idle
+      // and immediately to charge. This performs a full, valid charge cycle
+      // and gives feedback when the bank is ready with the new charge voltage.
       if (UNDERCHARGE_THRESHOLD_EXP(target_volts, current_volts)) {
         // Restart charging cycle
         state = IDLE;
       } else {
+        // As long as the voltage is in the right ballpark, we maintain charge
+        // quietly while waiting for a flash
         arm_flash_int();
         if (REFRESH_CHARGE_THRESHOLD_EXP(target_volts, current_volts)) {
           CHARGE_ON;
@@ -171,8 +179,11 @@ void loop() {
       }
       break;
     case FLASHING:
-      idle_timeout = millis() + FLASH_IDLE_DELAY_MS; // Stay idle for 250ms to allow arc to extinguish
-      state = IDLE; // Delay by two analogReads, in practice about 1ms
+      // This state is occupied only briefly and is mainly a pragmatic
+      // approach to keeping the flash triac energized for a good few microseconds.
+      // We use this time to set up an idle period during which the arc is allowed to extinguish.
+      idle_timeout = millis() + FLASH_IDLE_DELAY_MS;
+      state = IDLE;
       break;
     case FAULT:
       // Steady state: Bank idle, LED off, Lamp off, permanent beep
@@ -186,6 +197,12 @@ void loop() {
   }
 }
 
+// The ATmega's Analog comparator is used to directly measure mains voltageb through some 1M resistors.
+// The voltage on the MCU's pins are clamped by the body diodes of the output MOSFETs,
+// which are in the circuit even when the pin is in input mode.
+// The actual sign flipping of the potential difference always happens outside of the MCU's
+// supply voltage and is therefore etremely unreliable and asymmetric. Neverthless it's barely
+// usable for synchronization with mains to run a phase cut dimmer directly on the MCU.
 void setup_acint() {
   ACSR = 0;  // clear Analog Comparator interrupt enable
   ACSR = (1 << ACI);    // clear Analog Comparator interrupt
@@ -202,26 +219,31 @@ void setup_acint() {
 // Two Timer1 Copare Match Interrupts are used to generate a short, delayed pulse on DIM_TRIAC
 void setup_tint() {
   TIMSK1 = 0;
-  TCCR1A = 0;     // We hate TCCR1A
-  TCCR1B = 0b00000010;    // 8 prescaler
+  TCCR1A = 0; // We hate TCCR1A
+  TCCR1B = 0b00000010; // 8 prescaler
   OCR1A = MAX_DIM_MICROS - TRIAC_FIRE_MICROS;  // We subtract fixed values from TCNT to configure frequency. We could use the overflow interrupt instead, but this is just how I did it
-  OCR1B = MAX_DIM_MICROS;  // We subtract fixed values from TCNT to configure frequency. We could use the overflow interrupt instead, but this is just how I did it
-  TCNT1 = 0;      // First interval is assumed to be full 99ms
+  OCR1B = MAX_DIM_MICROS;
+  TCNT1 = 0;
   TIMSK1 = (1 << OCIE1A | 1 << OCIE1B); // enable timer overflow interrupts A and B
 }
 
+// Set up external interrupts and PCINT for triggering the flash
 void setup_flash_int() {
   EICRA = 0b00001010; // 10: Falling edge on INTn triggers interrupt
+  PCMSK1 = 1 << PCINT9; // Enable PCINT9 for PCINT1 group
+  PCICR = 1 << PCIE1; // Enable PCINT1 group}
 }
 
 inline void arm_flash_int() {
   EIFR = 3;  // Clear INT status (Thanks Utsuho)
   EIMSK = 3; // Set INT1 and INT0 bits
+  PCMSK1 = 1 << PCINT9;
   LED_ON;
 }
 
 inline void disarm_flash_int() {
   EIMSK = 0; // Clear INT1 and INT0 bits
+  PCMSK1 = 0;
   LED_OFF;
 }
 
@@ -242,6 +264,11 @@ ISR(INT0_vect) {
 }
 
 ISR(INT1_vect) {
+  flash();
+}
+
+// GMGKG triggers a flash using a PCINT.
+ISR(PCINT1_vect) {
   flash();
 }
 
