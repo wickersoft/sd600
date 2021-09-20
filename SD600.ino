@@ -58,10 +58,12 @@
 volatile enum charge_state {IDLE, CHARGING, READY, FLASHING, FAULT} state;
 volatile int current_intens = 0;
 volatile int current_volts = 0;
+volatile int target_volts = 0;
 volatile long idle_timeout = 0;
 volatile long charge_start = 0;
 volatile long charge_end = 0;
 volatile long overcharge_millis = 0;
+volatile long dim_micros = 0;
 
 void setup() {
   cli();
@@ -72,10 +74,6 @@ void setup() {
   setup_flash_int();
   idle_timeout = millis() + 1000; // Wait one second before charging
   state = IDLE; // Do not charge until firmware has finished booting
-  CHARGE_OFF;
-  FLASH_OFF;
-  BEEP_OFF;
-  LED_OFF;
   sei();
 }
 
@@ -83,13 +81,24 @@ void setup() {
 // We run a simple state machine governing the capacitor bank. A few extra checks are performed
 // frequently, such as bank overvoltage detection.
 void loop() {
-  current_volts = analogRead(HV_SENS) >> 1;
+  current_volts = analogRead(HV_SENS) >> 1; // Sensing range happens to be ~500V
   if (current_volts >= EMERGENCY_STOP_VOLTS) {
     state = FAULT;
   }
 
   current_intens = analogRead(INTENS);
-  int target_volts = MIN_VOLTS + (MAX_VOLTS - MIN_VOLTS) * current_intens / 1023L;
+  target_volts = MIN_VOLTS + (MAX_VOLTS - MIN_VOLTS) * current_intens / 1023L;
+  if (!READ_LAMP_MO2) {
+    dim_micros = MIN_DIM_MICROS + ((MAX_DIM_MICROS - MIN_DIM_MICROS) * current_intens) / 1023L;
+  } else if (!READ_LAMP_MO1) {
+    dim_micros = MAX_DIM_MICROS;
+  } else {
+    dim_micros = 0;
+  }
+
+  if (!READ_DIM && state != READY) {
+    dim_micros = 0;
+  }
 
   if (state != READY) {
     disarm_flash_int();
@@ -152,7 +161,8 @@ void loop() {
         if (overcharge_millis == 0) {
           overcharge_millis = millis();
         } else if (millis() - overcharge_millis > DUMP_FLASH_DELAY_MS) {
-          // Flash
+          // We have been in overcharge condition for a few seconds
+          // Waste Flash
           DEBUG_ON;
           DEBUG_OFF;
           cli();
@@ -224,7 +234,7 @@ void setup_tint() {
   OCR1A = MAX_DIM_MICROS - TRIAC_FIRE_MICROS;  // We subtract fixed values from TCNT to configure frequency. We could use the overflow interrupt instead, but this is just how I did it
   OCR1B = MAX_DIM_MICROS;
   TCNT1 = 0;
-  TIMSK1 = (1 << OCIE1A | 1 << OCIE1B); // enable timer overflow interrupts A and B
+  TIMSK1 = 6; // enable timer overflow interrupts A and B
 }
 
 // Set up external interrupts and PCINT for triggering the flash
@@ -237,13 +247,13 @@ void setup_flash_int() {
 inline void arm_flash_int() {
   EIFR = 3;  // Clear INT status (Thanks Utsuho)
   EIMSK = 3; // Set INT1 and INT0 bits
-  PCMSK1 = 1 << PCINT9;
+  PCMSK1 = 1 << PCINT9; // Enable GMGKG PCINT
   LED_ON;
 }
 
 inline void disarm_flash_int() {
   EIMSK = 0; // Clear INT1 and INT0 bits
-  PCMSK1 = 0;
+  PCMSK1 = 0; // Disable GMGKG PCINT
   LED_OFF;
 }
 
@@ -294,11 +304,15 @@ ISR(TIMER1_COMPB_vect) {
 // maximum duty cycle. At near full intensity, we stop switching and energize
 // the triac continuously. We don't need an exact phase cut anyway.
 ISR(ANALOG_COMP_vect) {
-  long dim_micros = MIN_DIM_MICROS + ((MAX_DIM_MICROS - MIN_DIM_MICROS) * current_intens) / 1023L;
-  if (!READ_DIM && dim_micros < MAX_DIM_MICROS - 3 * TRIAC_FIRE_MICROS) {
+  if(dim_micros == 0) {
+    TIMSK1 = 0;
+    DIM_TRIAC_OFF;
+  } else if (dim_micros < MAX_DIM_MICROS - 3 * TRIAC_FIRE_MICROS) {
     DIM_TRIAC_OFF;
     TCNT1 = dim_micros;
+    TIMSK1 = 6;
   } else {
     DIM_TRIAC_ON;
+    TIMSK1 = 0;
   }
 }
