@@ -13,10 +13,9 @@ While repairing a number of SD600 flash lamps, I destroyed the MCU of one of the
 * Responds to Test switch and signal on 6.3mm jack
 * Response time to trigger signal ~2µs
 * Optical trigger
+* Model/Full Switch
 
 **To be added:**
-
-* Lamp-Mode switch
 * Possibly remove dependencies on Arduino core
 
 The firmware was built in Arduino because the MCU is an ATmega48P. ATmega328P in QFP32 package is fully compatible with SD600 controller board. Controller board also contains a 6x1 ICSP header in 2mm pin pitch.
